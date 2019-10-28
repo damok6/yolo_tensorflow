@@ -6,11 +6,17 @@ import tensorflow as tf
 import yolo.config as cfg
 from yolo.yolo_net import YOLONet
 from utils.timer import Timer
+import paho.mqtt.client as mqtt
+
+MQTT_ADDRESS = '127.0.0.1'
+MQTT_USER = 'mqttuser'
+MQTT_PASSWORD = 'mqttpassword'
+MQTT_CLIENT_ID = 'camera_presence_detector'
 
 
 class Detector(object):
 
-    def __init__(self, net, weight_file):
+    def __init__(self, net, weight_file, mqtt_client):
         self.net = net
         self.weights_file = weight_file
 
@@ -31,6 +37,10 @@ class Detector(object):
         print('Restoring weights from: ' + self.weights_file)
         self.saver = tf.train.Saver()
         self.saver.restore(self.sess, self.weights_file)
+        
+        self.face_detected = None
+        self.face_prob_thresh = 0.3  # highest face prob must be greater than this
+        self.mqtt_client = mqtt_client
 
     def draw_result(self, img, result):
         for i in range(len(result)):
@@ -151,6 +161,24 @@ class Detector(object):
         inter = 0 if tb < 0 or lr < 0 else tb * lr
         return inter / (box1[2] * box1[3] + box2[2] * box2[3] - inter)
 
+    def broadcast_face_presence(self, result):
+        faces_list = [entry for entry in result if entry[0]=='person']
+        face_probs = [entry[5] for entry in faces_list]
+        max_face_prob = max(face_probs) if len(face_probs) else 0
+        
+        if max_face_prob > self.face_prob_thresh:
+            if self.face_detected != True:
+            	print('FACE Newly Detected')
+            	self.face_detected = True
+            	self.mqtt_client.publish("cached/camera_presence/camera_presence_1", 
+            	    self.face_detected)
+        else:
+            if self.face_detected != False:
+            	print('FACE Gone')
+            	self.face_detected = False
+            	self.mqtt_client.publish("cached/camera_presence/camera_presence_1", 
+            	    self.face_detected)
+	
     def camera_detector(self, cap, wait=10):
         detect_timer = Timer()
         ret, _ = cap.read()
@@ -159,7 +187,7 @@ class Detector(object):
             ret, frame = cap.read()
             detect_timer.tic()
             result = self.detect(frame)
-            print(result)
+            self.broadcast_face_presence(result)
             detect_timer.toc()
             print('Average detecting time: {:.3f}s'.format(
                 detect_timer.average_time))
@@ -196,8 +224,15 @@ def main():
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
     yolo = YOLONet(False)
+    
+    mqtt_client = mqtt.Client(MQTT_CLIENT_ID)
+    mqtt_client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+    # mqtt_client.on_connect...
+    mqtt_client.connect(MQTT_ADDRESS, 1883, keepalive=60)
+    mqtt_client.loop_start()
+    
     weight_file = os.path.join(args.data_dir, args.weight_dir, args.weights)
-    detector = Detector(yolo, weight_file)
+    detector = Detector(yolo, weight_file, mqtt_client)
 
     # detect from camera
     cap = cv2.VideoCapture(-1)
